@@ -7,11 +7,18 @@
 NVDA global plugin to make Claude Desktop more accessible.
 Monitors Claude Desktop for status changes and speaks them,
 then focuses the response when complete.
+
+Note: Claude Desktop is an Electron app. Its content is rendered in a
+Chromium webview, so some UI elements may not be fully exposed via
+Windows UI Automation. This plugin uses multiple strategies:
+1. UIA tree traversal for status detection
+2. Live region event monitoring for dynamic updates
+3. Deeper traversal to find web content elements
 """
 
 import threading
 import time
-from typing import Optional
+from typing import Optional, Set
 import weakref
 
 import api
@@ -30,6 +37,18 @@ from NVDAObjects.UIA import UIA
 CLAUDE_WINDOW_CLASS = "Chrome_WidgetWin_1"
 CLAUDE_WINDOW_TITLE = "Claude"
 
+# Action keywords that appear in inline action indicators
+ACTION_KEYWORDS = [
+	# Status indicators
+	"thinking", "generating", "typing", "processing",
+	"loading", "waiting", "sending", "responding",
+	"claude is", "stop",
+	# Action indicators (for tool use)
+	"reading", "writing", "searching", "running",
+	"analyzing", "creating", "editing", "executing",
+	"fetching", "downloading", "uploading",
+]
+
 
 class StatusMonitor:
 	"""Monitors Claude Desktop for status changes and response completion."""
@@ -39,8 +58,9 @@ class StatusMonitor:
 		self._running = False
 		self._thread: Optional[threading.Thread] = None
 		self._last_status: Optional[str] = None
+		self._last_actions: Set[str] = set()
 		self._was_generating = False
-		self._poll_interval = 0.5  # seconds
+		self._poll_interval = 0.3  # seconds - faster polling for action updates
 
 	def start(self):
 		"""Start the status monitoring thread."""
@@ -89,12 +109,13 @@ class StatusMonitor:
 		"""Find status indicator elements in Claude Desktop."""
 		status_elements = []
 		try:
-			self._traverse_for_status(root, status_elements, max_depth=10)
+			# Use deeper traversal for Electron apps
+			self._traverse_for_status(root, status_elements, max_depth=25)
 		except Exception as e:
 			log.debugWarning(f"Error finding status elements: {e}")
 		return status_elements
 
-	def _traverse_for_status(self, obj: NVDAObject, results: list, depth: int = 0, max_depth: int = 10):
+	def _traverse_for_status(self, obj: NVDAObject, results: list, depth: int = 0, max_depth: int = 25):
 		"""Recursively traverse the UI tree looking for status indicators."""
 		if depth > max_depth:
 			return
@@ -104,15 +125,8 @@ class StatusMonitor:
 			name = obj.name or ""
 			role = obj.role
 
-			# Common status patterns in Claude Desktop
-			status_keywords = [
-				"thinking", "generating", "typing", "processing",
-				"loading", "waiting", "sending", "responding",
-				"claude is", "stop"
-			]
-
 			name_lower = name.lower()
-			for keyword in status_keywords:
+			for keyword in ACTION_KEYWORDS:
 				if keyword in name_lower:
 					results.append(obj)
 					break
@@ -121,6 +135,15 @@ class StatusMonitor:
 			if role in (controlTypes.Role.PROGRESSBAR, controlTypes.Role.ANIMATION):
 				results.append(obj)
 
+			# Check for live regions (common in web apps for status updates)
+			try:
+				if hasattr(obj, 'UIAElement') and obj.UIAElement:
+					live_setting = obj.UIAElement.CurrentLiveSetting
+					if live_setting and live_setting > 0:  # 1=polite, 2=assertive
+						results.append(obj)
+			except Exception:
+				pass
+
 			# Traverse children
 			for child in obj.children or []:
 				self._traverse_for_status(child, results, depth + 1, max_depth)
@@ -128,25 +151,40 @@ class StatusMonitor:
 		except Exception as e:
 			log.debugWarning(f"Error traversing UI tree: {e}")
 
-	def _get_current_status(self, window: NVDAObject) -> Optional[str]:
-		"""Get the current status from Claude Desktop."""
+	def _get_current_status(self, window: NVDAObject) -> tuple[Optional[str], Set[str]]:
+		"""Get the current status and active actions from Claude Desktop.
+
+		Returns:
+			Tuple of (main_status, set_of_action_names)
+		"""
 		status_elements = self._find_status_elements(window)
+		main_status = None
+		actions: Set[str] = set()
+
 		for elem in status_elements:
 			try:
 				name = elem.name
 				if name:
-					return name
+					# Check if this is a main status indicator
+					name_lower = name.lower()
+					if any(kw in name_lower for kw in ["thinking", "generating", "stop"]):
+						main_status = name
+					else:
+						# It's an action indicator
+						actions.add(name)
 			except Exception:
 				pass
-		return None
 
-	def _is_generating(self, status: Optional[str]) -> bool:
+		return main_status, actions
+
+	def _is_generating(self, status: Optional[str], actions: Set[str]) -> bool:
 		"""Check if Claude is currently generating a response."""
-		if not status:
-			return False
-		status_lower = status.lower()
-		generating_keywords = ["thinking", "generating", "typing", "processing", "stop"]
-		return any(kw in status_lower for kw in generating_keywords)
+		if status:
+			status_lower = status.lower()
+			if any(kw in status_lower for kw in ["thinking", "generating", "typing", "processing", "stop"]):
+				return True
+		# Also consider it generating if there are active actions
+		return len(actions) > 0
 
 	def _focus_response(self, window: NVDAObject):
 		"""Focus the response area after generation completes."""
@@ -198,14 +236,20 @@ class StatusMonitor:
 			try:
 				window = self._get_claude_window()
 				if window:
-					current_status = self._get_current_status(window)
-					is_generating = self._is_generating(current_status)
+					current_status, current_actions = self._get_current_status(window)
+					is_generating = self._is_generating(current_status, current_actions)
 
-					# Announce status changes
+					# Announce main status changes
 					if current_status and current_status != self._last_status:
-						# Queue the message to be spoken on the main thread
 						self._speak_status(current_status)
 						self._last_status = current_status
+
+					# Announce new actions (e.g., "Reading file...", "Searching...")
+					new_actions = current_actions - self._last_actions
+					for action in new_actions:
+						self._speak_status(action)
+
+					self._last_actions = current_actions
 
 					# Check if generation just completed
 					if self._was_generating and not is_generating:
