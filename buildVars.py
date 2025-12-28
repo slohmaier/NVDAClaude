@@ -37,9 +37,9 @@ and focusing responses when they complete."""),
 	# Documentation file name
 	addon_docFileName="readme.html",
 	# Minimum NVDA version supported (e.g. "2019.3.0", minor version is optional)
-	addon_minimumNVDAVersion="2023.1.0",
+	addon_minimumNVDAVersion="2024.1",
 	# Last NVDA version supported/tested (e.g. "2024.4.0", ideally more recent than minimum version)
-	addon_lastTestedNVDAVersion="2024.4.0",
+	addon_lastTestedNVDAVersion="2025.3.2",
 	# Add-on update channel (default is None, denoting stable releases,
 	# and for development releases, use "dev".)
 	# Do not change unless you know what you are doing!
@@ -55,7 +55,7 @@ and focusing responses when they complete."""),
 # or use glob expressions.
 # For example to include all files with a ".py" extension from the "globalPlugins" dir of your add-on
 # the list can be written as follows:
-pythonSources: list[str] = ["addon/globalPlugins/*.py"]
+pythonSources: list[str] = ["addon/globalPlugins/**/*.py"]
 
 # Files that contain strings for translation. Usually your python sources
 i18nSources: list[str] = pythonSources + ["buildVars.py"]

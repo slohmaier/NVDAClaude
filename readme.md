@@ -9,8 +9,9 @@ This NVDA add-on makes Claude Desktop more accessible for screen reader users.
 
 ## Requirements
 
-- NVDA 2023.1 or later
+- NVDA 2024.1 or later
 - Claude Desktop for Windows (Electron app)
+- **Important**: Claude Desktop must be started with accessibility enabled (see below)
 
 ## Installation
 
@@ -18,11 +19,22 @@ This NVDA add-on makes Claude Desktop more accessible for screen reader users.
 2. Double-click the file to install, or use NVDA's Add-on Manager
 3. Restart NVDA when prompted
 
+## Enabling Accessibility in Claude Desktop
+
+Claude Desktop (Electron/Chromium) requires a special flag to expose its UI to screen readers:
+
+```powershell
+# Start Claude Desktop with accessibility enabled
+& "$env:LOCALAPPDATA\AnthropicClaude\claude.exe" --force-renderer-accessibility
+```
+
+You can create a shortcut with this flag for easier access.
+
 ## Usage
 
-Once installed, the add-on works automatically when Claude Desktop is running:
+Once installed and Claude Desktop is running with accessibility enabled:
 
-1. Open Claude Desktop
+1. Open Claude Desktop (with --force-renderer-accessibility flag)
 2. Type your message and send it
 3. The add-on will announce status changes as Claude processes your request
 4. When the response is complete, NVDA will announce "Response complete" and focus the response

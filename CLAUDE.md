@@ -30,7 +30,7 @@ Requirements: Python 3.10+, SCons, GNU Gettext (for translations)
 ## Architecture
 
 ### Directory Structure
-- `addon/globalPlugins/claudeDesktop.py` - Main plugin code with status monitoring and focus management
+- `addon/globalPlugins/claudeDesktop/__init__.py` - Main plugin code with status monitoring and focus management
 - `buildVars.py` - Add-on metadata (name, version, author, NVDA version requirements)
 - `sconstruct` - SCons build configuration (inherited from nvaccess/addonTemplate)
 - `site_scons/` - NVDA addon build tools
@@ -64,11 +64,32 @@ All UI interactions use `wx.CallAfter()` to ensure they run on NVDA's main threa
 - Also checks for UIA live regions for dynamic updates
 - Uses `weakref` for plugin reference to prevent circular references
 
-## Electron App Limitations
+## Electron App Accessibility
 
-Claude Desktop is an Electron app with Chromium webview. The inline action indicators
-(rounded rectangles showing "Reading file...", etc.) may not always be fully exposed
-via Windows UI Automation. The plugin uses multiple strategies:
-1. Deep UIA tree traversal
-2. Live region detection
-3. Keyword matching on element names
+**CRITICAL**: Claude Desktop must be started with `--force-renderer-accessibility` flag
+to expose its UI to screen readers:
+
+```powershell
+& "$env:LOCALAPPDATA\AnthropicClaude\claude.exe" --force-renderer-accessibility
+```
+
+Without this flag, the Chromium webview content is not exposed via Windows UI Automation.
+
+## Debugging Workflow
+
+1. Build the addon: `scons`
+2. Extract/copy to NVDA addons directory: `%APPDATA%\nvda\addons\NVDAClaude\`
+3. Start NVDA with logging: `nvda --log-file=nvda.log`
+4. Check log for plugin load message: "Claude Desktop accessibility plugin loaded"
+
+### UIA Structure Analysis
+
+Use the sibling `dumpUIA` tool to analyze Claude Desktop's UI:
+
+```powershell
+# List all windows
+python ..\dumpUIA\dumpUIA.py
+
+# Dump Claude Desktop UI (requires --force-renderer-accessibility)
+python ..\dumpUIA\dumpUIA.py -w "Claude" -j
+```
