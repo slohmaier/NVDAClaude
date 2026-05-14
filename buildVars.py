@@ -24,12 +24,12 @@ addon_info = AddonInfo(
 	addon_description=_("""Makes the Anthropic Claude desktop client more accessible for screen reader users.
 Adds keyboard shortcuts to jump between messages (next/previous, user-only, Claude-only),
 to read the current message in full, and to copy it to the clipboard.
-Works on the Chat and Code surfaces (auto-detected); Cowork support is planned."""),
+Works on all three surfaces — Chat, Code, and Cowork — auto-detected per gesture."""),
 	# version
-	addon_version="0.2.0",
+	addon_version="0.3.0",
 	# Brief changelog for this version
 	# Translators: what's new content for the add-on version to be shown in the add-on store
-	addon_changelog=_("""Version 0.2.0: Adds support for the Code surface (Claude Code sessions). The same shortcuts now also navigate Code conversations using the per-turn "Fork from here" / "Pin as chapter" buttons that Anthropic ships in the Code DOM. Surface is auto-detected; gestures still no-op on Cowork until that surface is analyzed.\n\nVersion 0.1.0: Initial release. Keyboard navigation between chat messages in the Claude desktop client. Uses the screen-reader-only turn anchors that Anthropic already ships in the DOM."""),
+	addon_changelog=_("""Version 0.3.0: Adds support for the Cowork surface. Anthropic only ships the user turn anchor there (no "Claude responded" sr-only), so the add-on synthesizes Claude turns from the gap between consecutive user messages. Tool invocations ("Execute Shell Command", "MacMini-Integration used", etc.) are read as part of the response. First press of any navigation key now lands on the latest message; if Claude produces a new response between gestures, the next press snaps to that new latest. Internal pipeline rewritten to do a single UIA tree walk per gesture (~50% faster) and to cache the result for ~1.5 s for snappy successive presses.\n\nVersion 0.2.0: Adds support for the Code surface using the per-turn "Fork from here" / "Pin as chapter" buttons.\n\nVersion 0.1.0: Initial release. Keyboard navigation between chat messages."""),
 	# Author(s)
 	addon_author="Stefan Lohmaier <stefan@slohmaier.de>",
 	# URL for the add-on documentation support

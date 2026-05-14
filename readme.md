@@ -34,13 +34,13 @@ All shortcuts can be re-bound through NVDA's "Input gestures" dialog (category: 
 
 The Claude desktop client has three different UI surfaces:
 
-| Surface | v0.2 status | Anchor mechanism |
+| Surface | v0.3 status | Anchor mechanism |
 |---|---|---|
-| Chat | **Supported** | Screen-reader-only turn anchors (`"You said: …"` / `"Claude said: …"` / `"Du hast gesagt: …"` / `"Claude hat geantwortet: …"`) |
-| Code | **Supported** | Per-turn terminator buttons (`"Fork from here"` / `"Pin as chapter"` and German equivalents `"Von hier forken"` / `"Als Kapitel anheften"`) |
-| Cowork | Not yet — gestures no-op | TBD |
+| Chat | **Supported** | Screen-reader-only turn anchors for both speakers (`"You said: …"` / `"Claude said: …"` and DE equivalents) |
+| Code | **Supported** | Per-turn terminator buttons (`"Fork from here"` / `"Pin as chapter"` and DE equivalents `"Von hier forken"` / `"Als Kapitel anheften"`) |
+| Cowork | **Supported** | Chat-style user sr-only anchors only; assistant turns are synthesized from the gap, using the per-message `"Copy"` button as the end-of-user marker. Tool invocations are read as part of the response. |
 
-Surface is auto-detected per gesture: chat anchors take precedence, then code anchors. If neither is present (e.g. Cowork), the add-on announces "No messages on this surface" and does nothing else.
+Surface is auto-detected per gesture (single UIA tree walk, then chat → cowork → code in priority order). If none of the patterns are present the add-on announces "No messages on this surface" and does nothing.
 
 ## Locales
 
@@ -55,6 +55,8 @@ Recognized markers (configurable at the top of `addon/appModules/claude.py`):
 
 - User: `Von hier forken`, `Fork from here`
 - Assistant: `Als Kapitel anheften`, `Pin as chapter`
+
+**Cowork surface:** reuses the chat user prefixes above; the Copy button at the end of each user message is matched against `Copy` / `Kopieren`.
 
 If your Claude UI is in another language, add the corresponding strings to the constant tuples. Pull requests welcome.
 
