@@ -34,22 +34,29 @@ All shortcuts can be re-bound through NVDA's "Input gestures" dialog (category: 
 
 The Claude desktop client has three different UI surfaces:
 
-| Surface | v0.1 status |
-|---|---|
-| Chat | **Supported** |
-| Code | Not yet — gestures no-op |
-| Cowork | Not yet — gestures no-op |
+| Surface | v0.2 status | Anchor mechanism |
+|---|---|---|
+| Chat | **Supported** | Screen-reader-only turn anchors (`"You said: …"` / `"Claude said: …"` / `"Du hast gesagt: …"` / `"Claude hat geantwortet: …"`) |
+| Code | **Supported** | Per-turn terminator buttons (`"Fork from here"` / `"Pin as chapter"` and German equivalents `"Von hier forken"` / `"Als Kapitel anheften"`) |
+| Cowork | Not yet — gestures no-op | TBD |
 
-If a gesture fires in Code or Cowork, the add-on announces "No messages on this surface" and does nothing else.
+Surface is auto-detected per gesture: chat anchors take precedence, then code anchors. If neither is present (e.g. Cowork), the add-on announces "No messages on this surface" and does nothing else.
 
 ## Locales
 
-Recognized turn-anchor prefixes (set in `addon/appModules/claude.py`):
+Recognized markers (configurable at the top of `addon/appModules/claude.py`):
+
+**Chat surface (sr-only anchor prefixes):**
 
 - User: `Du hast gesagt:`, `You said:`
 - Assistant: `Claude hat geantwortet:`, `Claude said:`, `Claude responded:`
 
-If your Claude UI is in another language, add the corresponding prefixes to `USER_PREFIXES` / `ASSISTANT_PREFIXES`. Pull requests welcome.
+**Code surface (terminator button names — exact match):**
+
+- User: `Von hier forken`, `Fork from here`
+- Assistant: `Als Kapitel anheften`, `Pin as chapter`
+
+If your Claude UI is in another language, add the corresponding strings to the constant tuples. Pull requests welcome.
 
 ## Building
 

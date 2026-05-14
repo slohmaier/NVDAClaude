@@ -2,13 +2,21 @@
 # Copyright (C) 2026 Stefan Lohmaier <stefan@slohmaier.de>
 # Licensed under the GNU General Public License v2.
 #
-# Provides keyboard navigation between chat messages by locating the
-# screen-reader-only turn anchors that Anthropic already ships in the
-# Chromium DOM ("You said: …" / "Claude said: …" and their localized
-# counterparts).
+# Provides keyboard navigation between messages on multiple surfaces:
+#   - Chat: uses screen-reader-only turn anchors that Anthropic already ships
+#     in the Chromium DOM ("You said: …" / "Claude said: …" and localized
+#     counterparts).
+#   - Code: uses the per-message terminator buttons ("Von hier forken" =
+#     end of a user message, "Als Kapitel anheften" = end of a Claude
+#     response) plus the preceding "Nachricht kopieren" button.
+#   - Cowork: not yet implemented; gestures no-op there.
+#
+# Surface is auto-detected per gesture: if chat anchors exist they take
+# precedence, otherwise we try the code surface.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Iterator, List, Optional, Tuple
 
 import api
@@ -29,38 +37,82 @@ except ImportError:
 
 
 # --------------------------------------------------------------------------
-# Turn-anchor prefixes
+# Chat surface — sr-only turn anchors
 # --------------------------------------------------------------------------
-# Each turn (one user message or one assistant message) in the Claude chat
-# DOM is preceded by a 1x1 px screen-reader-only <span> exposed to UIA as a
-# Text element whose Name starts with one of these prefixes. They are the
-# basis for next/previous-message navigation. Add new prefixes here when
-# new UI locales are encountered.
 
-USER_PREFIXES: Tuple[str, ...] = (
+CHAT_USER_PREFIXES: Tuple[str, ...] = (
 	"Du hast gesagt:",   # de
 	"You said:",         # en
 )
 
-ASSISTANT_PREFIXES: Tuple[str, ...] = (
+CHAT_ASSISTANT_PREFIXES: Tuple[str, ...] = (
 	"Claude hat geantwortet:",  # de
 	"Claude said:",             # en (older)
 	"Claude responded:",        # en (newer)
 )
 
-ALL_PREFIXES: Tuple[str, ...] = USER_PREFIXES + ASSISTANT_PREFIXES
+CHAT_ALL_PREFIXES: Tuple[str, ...] = CHAT_USER_PREFIXES + CHAT_ASSISTANT_PREFIXES
+
+
+# --------------------------------------------------------------------------
+# Code surface — per-turn terminator buttons
+# --------------------------------------------------------------------------
+# Each turn ends with a "Nachricht kopieren" button followed by a
+# speaker-specific button. The speaker-specific one tells us who the
+# message belongs to.
+
+CODE_USER_TERMINATORS: Tuple[str, ...] = (
+	"Von hier forken",
+	"Fork from here",
+)
+
+CODE_ASSISTANT_TERMINATORS: Tuple[str, ...] = (
+	"Als Kapitel anheften",
+	"Pin as chapter",
+)
+
+CODE_ALL_TERMINATORS: Tuple[str, ...] = CODE_USER_TERMINATORS + CODE_ASSISTANT_TERMINATORS
+
+# Activity summary buttons (e.g. "Ausgeführt 13 Befehle, …") that Claude
+# prepends to its responses on the Code surface. We treat them as part of
+# the turn content for "read full message", but we don't navigate onto
+# them — the natural landing spot is the first prose text.
+CODE_ACTIVITY_PREFIXES: Tuple[str, ...] = (
+	"Ausgeführt ",     # de
+	"Ran ",            # en
+	"Performed ",      # en (some variants)
+)
+
+
+# --------------------------------------------------------------------------
+# General
+# --------------------------------------------------------------------------
 
 # Localized names of the main chat container <main role="main">. Used to
 # scope the descendant walk so we don't recurse into the sidebar.
 MAIN_AREA_NAMES: Tuple[str, ...] = (
 	"Hauptbereich",  # de
 	"Main area",     # en
-	"Main",          # en (fallback)
+	"Main",          # en fallback
 )
 
-# How deep we recurse below the main area. The chat DOM is typically
-# 8–12 levels deep; 25 is comfortably above the worst case.
+# How deep we recurse below the main area.
 MAX_WALK_DEPTH = 25
+
+
+# --------------------------------------------------------------------------
+# Data model
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class _Turn:
+	"""One conversational turn on either surface."""
+
+	speaker: str  # "user" or "assistant"
+	nav_obj: NVDAObject  # element to land on when navigating to this turn
+	start_top: int  # vertical top of nav_obj
+	end_top: int  # vertical top of the next turn's nav_obj or +∞
 
 
 # --------------------------------------------------------------------------
@@ -75,12 +127,20 @@ def _safe_attr(obj: NVDAObject, name: str, default=None):
 		return default
 
 
+def _top(obj: NVDAObject) -> Optional[int]:
+	loc = _safe_attr(obj, "location")
+	if loc is None:
+		return None
+	try:
+		return int(loc.top)
+	except Exception:
+		return None
+
+
 def _walk_descendants(obj: NVDAObject, max_depth: int = MAX_WALK_DEPTH) -> Iterator[NVDAObject]:
 	"""Yield every descendant of ``obj`` in document order.
 
-	Uses ``firstChild`` / ``next`` to traverse so it works for both UIA and
-	IA2 backends. Bounded by ``max_depth`` to keep walks cheap and to avoid
-	pathological loops if a backend ever returns a self-referential tree.
+	Uses ``firstChild`` / ``next`` so it works for both UIA and IA2 backends.
 	"""
 	if obj is None or max_depth < 0:
 		return
@@ -106,11 +166,7 @@ def _name_starts_with(obj: NVDAObject, prefixes: Tuple[str, ...]) -> bool:
 
 
 def _find_main_area(root: NVDAObject) -> Optional[NVDAObject]:
-	"""Locate the main chat region (``<main>``) inside the Claude window.
-
-	Falls back to ``root`` if no match — the walk then becomes whole-window
-	scope, which is slower but still correct.
-	"""
+	"""Locate the main chat region (``<main>``) inside the Claude window."""
 	for obj in _walk_descendants(root, max_depth=15):
 		try:
 			if obj.role == controlTypes.Role.GROUP and obj.name in MAIN_AREA_NAMES:
@@ -120,109 +176,197 @@ def _find_main_area(root: NVDAObject) -> Optional[NVDAObject]:
 	return None
 
 
-def _collect_anchors(
-	root: NVDAObject,
-	prefixes: Tuple[str, ...] = ALL_PREFIXES,
-) -> List[NVDAObject]:
-	"""Return all turn anchors matching ``prefixes`` in reading order."""
+# --------------------------------------------------------------------------
+# Chat surface collector
+# --------------------------------------------------------------------------
+
+
+def _collect_chat_turns(root: NVDAObject) -> List[_Turn]:
 	main = _find_main_area(root) or root
-	anchors: List[NVDAObject] = []
+	candidates: List[Tuple[NVDAObject, int, str]] = []
 	for obj in _walk_descendants(main):
 		try:
 			if obj.role != controlTypes.Role.STATICTEXT:
 				continue
 		except Exception:
 			continue
-		if not _name_starts_with(obj, prefixes):
+		t = _top(obj)
+		if t is None:
 			continue
-		anchors.append(obj)
-	# Sort by visual top — anchors live in document order already, but be
-	# defensive against shadow-DOM or virtualization shenanigans.
-	def _top(o: NVDAObject) -> int:
-		loc = _safe_attr(o, "location")
-		if loc is None:
-			return 0
-		try:
-			return int(loc.top)
-		except Exception:
-			return 0
-	anchors.sort(key=_top)
-	return anchors
+		if _name_starts_with(obj, CHAT_USER_PREFIXES):
+			candidates.append((obj, t, "user"))
+		elif _name_starts_with(obj, CHAT_ASSISTANT_PREFIXES):
+			candidates.append((obj, t, "assistant"))
+	candidates.sort(key=lambda c: c[1])
+	turns: List[_Turn] = []
+	for i, (obj, t, speaker) in enumerate(candidates):
+		end_top = candidates[i + 1][1] if i + 1 < len(candidates) else 10**9
+		turns.append(_Turn(speaker=speaker, nav_obj=obj, start_top=t, end_top=end_top))
+	return turns
 
 
-def _current_anchor_index(anchors: List[NVDAObject]) -> int:
-	"""Return the index of the anchor closest to the user's current vertical
-	position, or -1 if no useful reference position is available.
+# --------------------------------------------------------------------------
+# Code surface collector
+# --------------------------------------------------------------------------
 
-	"Current" means: the largest-top anchor whose top is at or above the
-	user's review/focus position. That maps naturally to "the message the
-	user is currently reading."
+
+def _collect_code_turns(root: NVDAObject) -> List[_Turn]:
+	"""Identify turns on the Code surface by walking the main area, finding
+	speaker-specific terminator buttons, and pairing each with the first
+	content element of that turn.
 	"""
-	if not anchors:
-		return -1
-	ref_top: Optional[int] = None
+	main = _find_main_area(root) or root
 
-	# Prefer the review cursor position — it follows browse-mode and
-	# explicit caret moves.
+	# 1. Linear list of children in document order, only those positioned
+	#    (have a sensible top). We need both terminators and content.
+	flat: List[Tuple[NVDAObject, int]] = []
+	for obj in _walk_descendants(main):
+		t = _top(obj)
+		if t is None:
+			continue
+		flat.append((obj, t))
+	flat.sort(key=lambda x: x[1])
+
+	# 2. Index of terminators in `flat`, with speaker.
+	terminators: List[Tuple[int, str]] = []  # (index_in_flat, speaker)
+	for i, (obj, _t) in enumerate(flat):
+		try:
+			if obj.role != controlTypes.Role.BUTTON:
+				continue
+			name = obj.name or ""
+		except Exception:
+			continue
+		if name in CODE_USER_TERMINATORS:
+			terminators.append((i, "user"))
+		elif name in CODE_ASSISTANT_TERMINATORS:
+			terminators.append((i, "assistant"))
+
+	if not terminators:
+		return []
+
+	# 3. For each terminator, the turn extends from (previous terminator's
+	#    flat-index + 1) up to (this terminator's flat-index - 1, before
+	#    "Nachricht kopieren"). The navigation anchor is the first element
+	#    in that range whose role is meaningful for a screen reader user.
+	turns: List[_Turn] = []
+	prev_end_flat_idx = -1
+	for tidx, speaker in terminators:
+		start_flat = prev_end_flat_idx + 1
+		end_flat = tidx
+		# Pick the first content element in [start_flat, end_flat). Skip
+		# the "Nachricht kopieren" button which always sits right before
+		# the terminator.
+		nav_obj: Optional[NVDAObject] = None
+		for j in range(start_flat, end_flat):
+			obj, _t2 = flat[j]
+			try:
+				role = obj.role
+				name = obj.name or ""
+			except Exception:
+				continue
+			if role == controlTypes.Role.BUTTON and name in (
+				"Nachricht kopieren", "Copy message",
+			):
+				continue
+			# Anything that has text content is fine as a landing spot.
+			if role in (
+				controlTypes.Role.STATICTEXT,
+				controlTypes.Role.LINK,
+				controlTypes.Role.BUTTON,  # e.g. activity summary
+				controlTypes.Role.HEADING,
+				controlTypes.Role.LIST,
+				controlTypes.Role.LISTITEM,
+			):
+				nav_obj = obj
+				break
+		# Fallback: use the terminator itself if we couldn't find a body.
+		if nav_obj is None:
+			nav_obj = flat[tidx][0]
+		nav_top = _top(nav_obj) or flat[tidx][1]
+		turns.append(_Turn(
+			speaker=speaker,
+			nav_obj=nav_obj,
+			start_top=nav_top,
+			end_top=flat[tidx][1],  # tightened below
+		))
+		prev_end_flat_idx = tidx
+
+	# 4. Patch end_top to be the *next* turn's start_top so "read full
+	#    message" covers the right range. Without this, end_top sits at the
+	#    terminator button which excludes nothing — the next turn's text
+	#    would bleed into this one.
+	for i in range(len(turns) - 1):
+		turns[i].end_top = turns[i + 1].start_top
+	if turns:
+		turns[-1].end_top = 10**9
+	return turns
+
+
+# --------------------------------------------------------------------------
+# Surface-agnostic API
+# --------------------------------------------------------------------------
+
+
+def _collect_turns(root: NVDAObject) -> List[_Turn]:
+	"""Auto-detect surface and return its turn list. Empty list if neither
+	surface has identifiable turns (e.g. Cowork, empty chat, sidebar focus).
+	"""
+	turns = _collect_chat_turns(root)
+	if turns:
+		return turns
+	return _collect_code_turns(root)
+
+
+def _filter_turns(turns: List[_Turn], kind: str) -> List[_Turn]:
+	if kind == "user":
+		return [t for t in turns if t.speaker == "user"]
+	if kind == "assistant":
+		return [t for t in turns if t.speaker == "assistant"]
+	return turns
+
+
+def _current_turn_top(turns: List[_Turn]) -> Optional[int]:
+	"""Return the top coordinate of the turn the user is currently on."""
+	if not turns:
+		return None
+	ref_top: Optional[int] = None
 	try:
 		ti = api.getReviewPosition()
 		if ti is not None:
-			rect = _safe_attr(ti, "boundingRects", None)
-			if rect:
+			rects = _safe_attr(ti, "boundingRects", None)
+			if rects:
 				try:
-					ref_top = int(rect[0].top)
+					ref_top = int(rects[0].top)
 				except Exception:
 					ref_top = None
 	except Exception:
 		ref_top = None
-
-	# Fall back to the focus object's top.
 	if ref_top is None:
 		focus = api.getFocusObject()
-		loc = _safe_attr(focus, "location") if focus is not None else None
-		if loc is not None:
-			try:
-				ref_top = int(loc.top)
-			except Exception:
-				ref_top = None
-
+		ref_top = _top(focus) if focus is not None else None
 	if ref_top is None:
-		return -1
-
-	idx = -1
-	for i, anchor in enumerate(anchors):
-		loc = _safe_attr(anchor, "location")
-		if loc is None:
-			continue
-		try:
-			if int(loc.top) <= ref_top:
-				idx = i
-			else:
-				break
-		except Exception:
-			continue
-	return idx
+		return None
+	# Largest start_top that is <= ref_top.
+	current = None
+	for t in turns:
+		if t.start_top <= ref_top:
+			current = t.start_top
+		else:
+			break
+	return current
 
 
 def _move_to(obj: NVDAObject) -> None:
-	"""Best-effort: scroll the anchor into view, move the review cursor to
-	it, and speak it.
-	"""
-	# UIA elements expose scrollIntoView; ignore failures (e.g. IA2 backend).
+	"""Best-effort: scroll into view, move the review cursor, and speak."""
 	try:
 		obj.scrollIntoView()
 	except Exception:
 		pass
-
-	# Move the review cursor.
 	try:
 		ti = obj.makeTextInfo(textInfos.POSITION_FIRST)
 		api.setReviewPosition(ti)
 	except Exception as exc:
 		log.debug(f"NVDAClaude: setReviewPosition failed: {exc}")
-
-	# Speak the anchor name — it already contains the first sentence of
-	# the message, which is the right level of detail for navigation.
 	try:
 		speech.speakObject(obj, reason=controlTypes.OutputReason.FOCUS)
 	except Exception:
@@ -232,63 +376,58 @@ def _move_to(obj: NVDAObject) -> None:
 			pass
 
 
-def _collect_message_text(anchor: NVDAObject, all_anchors: List[NVDAObject]) -> str:
-	"""Concatenate the text content of every node between ``anchor`` and the
-	next anchor (exclusive)."""
-	try:
-		anchor_top = int(anchor.location.top) if anchor.location else 0
-	except Exception:
-		anchor_top = 0
-	# Top of the next anchor, or +∞ for the last message.
-	next_top: Optional[int] = None
-	for a in all_anchors:
-		try:
-			t = int(a.location.top) if a.location else 0
-		except Exception:
-			continue
-		if t > anchor_top:
-			next_top = t
-			break
-
-	main = _find_main_area(api.getForegroundObject()) or api.getForegroundObject()
-	if main is None:
-		return anchor.name or ""
-
+def _collect_message_text(turn: _Turn, root: NVDAObject) -> str:
+	"""Concatenate the rendered text of one turn."""
+	main = _find_main_area(root) or root
 	parts: List[str] = []
-	# Skip the anchor itself (its name = the truncated first sentence).
-	# We want the actual rendered text, which sits in sibling Text nodes.
 	for obj in _walk_descendants(main):
 		try:
-			if obj.role not in (controlTypes.Role.STATICTEXT, controlTypes.Role.LINK):
-				continue
+			role = obj.role
 		except Exception:
 			continue
+		if role not in (
+			controlTypes.Role.STATICTEXT,
+			controlTypes.Role.LINK,
+			controlTypes.Role.BUTTON,
+			controlTypes.Role.HEADING,
+			controlTypes.Role.LISTITEM,
+		):
+			continue
+		t = _top(obj)
+		if t is None:
+			continue
+		if t < turn.start_top:
+			continue
+		if t >= turn.end_top:
+			continue
+		# Skip 1x1 sr-only fillers — their text was already part of the
+		# anchor name on chat surface, or is irrelevant on code surface.
 		loc = _safe_attr(obj, "location")
-		if loc is None:
-			continue
 		try:
-			top = int(loc.top)
-		except Exception:
-			continue
-		# Strictly between the current anchor and the next one. The anchor
-		# itself sits 1 px above the message body, so > anchor_top excludes it.
-		if top <= anchor_top:
-			continue
-		if next_top is not None and top >= next_top:
-			continue
-		# Skip 1x1 sr-only filler elements (they would duplicate already-
-		# announced anchor text).
-		try:
-			if loc.width <= 1 and loc.height <= 1:
+			if loc is not None and loc.width <= 1 and loc.height <= 1:
 				continue
 		except Exception:
 			pass
-		name = (obj.name or "").strip()
-		if name:
-			parts.append(name)
-
+		# Skip the per-message footer buttons on code surface.
+		try:
+			name = obj.name or ""
+		except Exception:
+			name = ""
+		if role == controlTypes.Role.BUTTON and name in (
+			"Nachricht kopieren", "Copy message",
+			"Als Kapitel anheften", "Pin as chapter",
+			"Von hier forken", "Fork from here",
+		):
+			continue
+		name_s = name.strip()
+		if name_s:
+			parts.append(name_s)
 	if not parts:
-		return anchor.name or ""
+		# Fallback: at least the anchor name.
+		try:
+			return (turn.nav_obj.name or "").strip()
+		except Exception:
+			return ""
 	return "\n".join(parts)
 
 
@@ -299,72 +438,51 @@ def _collect_message_text(anchor: NVDAObject, all_anchors: List[NVDAObject]) -> 
 
 class AppModule(appModuleHandler.AppModule):
 
-	# ----- navigation -----
-
-	def _navigate(self, prefixes: Tuple[str, ...], direction: int) -> None:
-		"""``direction`` is +1 for forward, -1 for backward."""
+	def _navigate(self, kind: str, direction: int) -> None:
+		"""``kind`` ∈ {"all","user","assistant"}, ``direction`` ∈ {+1,-1}."""
 		root = api.getForegroundObject()
 		if root is None:
-			# Translators: spoken when the Claude window cannot be located.
 			ui.message(_("Claude window not found"))
 			return
-		anchors = _collect_anchors(root, prefixes=prefixes)
-		if not anchors:
-			# Translators: spoken when no messages are present (or the
-			# current view isn't a chat — e.g. Code/Cowork surface).
+		all_turns = _collect_turns(root)
+		filtered = _filter_turns(all_turns, kind)
+		if not filtered:
 			ui.message(_("No messages on this surface"))
 			return
-		# When navigating filtered (user-only / assistant-only) we still
-		# want "current" to be defined relative to ALL anchors so jumps
-		# feel correct from the user's perspective.
-		all_anchors = (
-			anchors if prefixes is ALL_PREFIXES
-			else _collect_anchors(root, prefixes=ALL_PREFIXES)
-		)
-		cur_top = -1
-		cur_idx_all = _current_anchor_index(all_anchors)
-		if cur_idx_all >= 0:
-			try:
-				cur_top = int(all_anchors[cur_idx_all].location.top)
-			except Exception:
-				cur_top = -1
-
-		# Find the next/prev anchor (in the filtered list) relative to cur_top.
-		target: Optional[NVDAObject] = None
+		# Reference position from the *full* list so behaviour stays
+		# intuitive when user/assistant filtering is active.
+		cur_top = _current_turn_top(all_turns)
+		target: Optional[_Turn] = None
 		if direction > 0:
-			for a in anchors:
-				try:
-					t = int(a.location.top)
-				except Exception:
-					continue
-				if t > cur_top:
-					target = a
+			ref = cur_top if cur_top is not None else -10**9
+			for t in filtered:
+				if t.start_top > ref:
+					target = t
 					break
 		else:
-			for a in reversed(anchors):
-				try:
-					t = int(a.location.top)
-				except Exception:
-					continue
-				if t < cur_top or cur_top < 0:
-					target = a
+			ref = cur_top if cur_top is not None else 10**9
+			for t in reversed(filtered):
+				if t.start_top < ref:
+					target = t
 					break
-
+			# If the user is exactly on a turn and presses "previous", we
+			# want the one above — handled by < ref. If they're between
+			# turns, < ref still gives the previous one. Good.
 		if target is None:
-			# Translators: spoken when there is no further message in the
-			# requested direction.
 			ui.message(_("No more messages"))
 			return
-		_move_to(target)
+		_move_to(target.nav_obj)
+
+	# ----- next/previous -----
 
 	@script(
-		# Translators: input help message for next-message script.
+		# Translators: input help message.
 		description=_("Move to the next message in the Claude chat"),
 		category=_("Claude"),
 		gesture="kb:NVDA+alt+j",
 	)
 	def script_nextMessage(self, gesture):
-		self._navigate(ALL_PREFIXES, +1)
+		self._navigate("all", +1)
 
 	@script(
 		description=_("Move to the previous message in the Claude chat"),
@@ -372,7 +490,7 @@ class AppModule(appModuleHandler.AppModule):
 		gesture="kb:NVDA+alt+k",
 	)
 	def script_previousMessage(self, gesture):
-		self._navigate(ALL_PREFIXES, -1)
+		self._navigate("all", -1)
 
 	@script(
 		description=_("Move to the next user message in the Claude chat"),
@@ -380,7 +498,7 @@ class AppModule(appModuleHandler.AppModule):
 		gesture="kb:NVDA+alt+u",
 	)
 	def script_nextUserMessage(self, gesture):
-		self._navigate(USER_PREFIXES, +1)
+		self._navigate("user", +1)
 
 	@script(
 		description=_("Move to the previous user message in the Claude chat"),
@@ -388,7 +506,7 @@ class AppModule(appModuleHandler.AppModule):
 		gesture="kb:NVDA+alt+shift+u",
 	)
 	def script_previousUserMessage(self, gesture):
-		self._navigate(USER_PREFIXES, -1)
+		self._navigate("user", -1)
 
 	@script(
 		description=_("Move to the next Claude response"),
@@ -396,7 +514,7 @@ class AppModule(appModuleHandler.AppModule):
 		gesture="kb:NVDA+alt+a",
 	)
 	def script_nextAssistantMessage(self, gesture):
-		self._navigate(ASSISTANT_PREFIXES, +1)
+		self._navigate("assistant", +1)
 
 	@script(
 		description=_("Move to the previous Claude response"),
@@ -404,7 +522,7 @@ class AppModule(appModuleHandler.AppModule):
 		gesture="kb:NVDA+alt+shift+a",
 	)
 	def script_previousAssistantMessage(self, gesture):
-		self._navigate(ASSISTANT_PREFIXES, -1)
+		self._navigate("assistant", -1)
 
 	# ----- top / bottom / input -----
 
@@ -417,11 +535,11 @@ class AppModule(appModuleHandler.AppModule):
 		root = api.getForegroundObject()
 		if root is None:
 			return
-		anchors = _collect_anchors(root)
-		if not anchors:
+		turns = _collect_turns(root)
+		if not turns:
 			ui.message(_("No messages on this surface"))
 			return
-		_move_to(anchors[0])
+		_move_to(turns[0].nav_obj)
 
 	@script(
 		description=_("Move to the last message in the chat"),
@@ -432,11 +550,11 @@ class AppModule(appModuleHandler.AppModule):
 		root = api.getForegroundObject()
 		if root is None:
 			return
-		anchors = _collect_anchors(root)
-		if not anchors:
+		turns = _collect_turns(root)
+		if not turns:
 			ui.message(_("No messages on this surface"))
 			return
-		_move_to(anchors[-1])
+		_move_to(turns[-1].nav_obj)
 
 	@script(
 		description=_("Move focus to the Claude chat input field"),
@@ -448,11 +566,10 @@ class AppModule(appModuleHandler.AppModule):
 		if root is None:
 			return
 		main = _find_main_area(root) or root
-		# The composer is the bottom-most editable element inside the main
-		# region. There may be other Edit elements (e.g. an inline rename
-		# in the header) — picking the one with the largest top discriminates.
+		# The composer is the bottom-most editable element in the main
+		# region.
 		best: Optional[NVDAObject] = None
-		best_top = -1
+		best_top = -10**9
 		for obj in _walk_descendants(main):
 			try:
 				if obj.role not in (
@@ -464,15 +581,12 @@ class AppModule(appModuleHandler.AppModule):
 					continue
 			except Exception:
 				continue
-			loc = _safe_attr(obj, "location")
-			if loc is None:
+			t = _top(obj)
+			if t is None:
 				continue
-			try:
-				if int(loc.top) > best_top:
-					best_top = int(loc.top)
-					best = obj
-			except Exception:
-				continue
+			if t > best_top:
+				best_top = t
+				best = obj
 		if best is None:
 			ui.message(_("Input field not found"))
 			return
@@ -483,18 +597,21 @@ class AppModule(appModuleHandler.AppModule):
 
 	# ----- read / copy current message -----
 
-	def _current_anchor(self) -> Optional[NVDAObject]:
+	def _current_turn(self) -> Optional[Tuple[_Turn, NVDAObject]]:
 		root = api.getForegroundObject()
 		if root is None:
 			return None
-		anchors = _collect_anchors(root)
-		if not anchors:
+		turns = _collect_turns(root)
+		if not turns:
 			return None
-		idx = _current_anchor_index(anchors)
-		if idx < 0:
-			# Default to the last message if we can't locate the user.
-			return anchors[-1]
-		return anchors[idx]
+		cur_top = _current_turn_top(turns)
+		if cur_top is None:
+			return turns[-1], root  # default to last
+		# Find the turn whose start_top == cur_top.
+		for t in turns:
+			if t.start_top == cur_top:
+				return t, root
+		return turns[-1], root
 
 	@script(
 		description=_("Read the current message in full"),
@@ -502,16 +619,16 @@ class AppModule(appModuleHandler.AppModule):
 		gesture="kb:NVDA+alt+c",
 	)
 	def script_readCurrentMessage(self, gesture):
-		anchor = self._current_anchor()
-		if anchor is None:
+		cur = self._current_turn()
+		if cur is None:
 			ui.message(_("No messages on this surface"))
 			return
-		root = api.getForegroundObject()
-		text = _collect_message_text(anchor, _collect_anchors(root)) if root else (anchor.name or "")
+		turn, root = cur
+		text = _collect_message_text(turn, root)
 		if text:
 			speech.speakText(text)
 		else:
-			speech.speakObject(anchor, reason=controlTypes.OutputReason.FOCUS)
+			speech.speakObject(turn.nav_obj, reason=controlTypes.OutputReason.FOCUS)
 
 	@script(
 		description=_("Copy the current message to the clipboard"),
@@ -519,12 +636,12 @@ class AppModule(appModuleHandler.AppModule):
 		gesture="kb:NVDA+alt+shift+c",
 	)
 	def script_copyCurrentMessage(self, gesture):
-		anchor = self._current_anchor()
-		if anchor is None:
+		cur = self._current_turn()
+		if cur is None:
 			ui.message(_("No messages on this surface"))
 			return
-		root = api.getForegroundObject()
-		text = _collect_message_text(anchor, _collect_anchors(root)) if root else (anchor.name or "")
+		turn, root = cur
+		text = _collect_message_text(turn, root)
 		if not text:
 			ui.message(_("Nothing to copy"))
 			return

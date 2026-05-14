@@ -6,14 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **NVDAClaude** — NVDA add-on that makes the Anthropic Claude desktop client (`claude.exe`, Electron/Chromium, window class `Chrome_WidgetWin_1`) more accessible.
 
-Current scope (v0.1): keyboard navigation between chat messages. Code and Cowork surfaces are explicitly out of scope; gestures no-op there.
+Current scope (v0.2): keyboard navigation between messages on both the **Chat** and **Code** surfaces. **Cowork** surface is not yet supported; gestures no-op there.
 
 ## Git
 
 - Commit email: `stefan@slohmaier.de`
 - Remote: `https://github.com/slohmaier/NVDAClaude`
 
-## How the Claude desktop client exposes the chat to UIA
+## How the Claude desktop client exposes its surfaces to UIA
+
+Both surfaces share the outer scaffolding: `Group Name="Hauptbereich"` / `"Main area"` wraps the scrollable conversation area, with the sidebar (chat history / session list) sitting outside it.
+
+### Chat surface
 
 Before each turn there is a 1×1-pixel screen-reader-only Text element acting as anchor:
 
@@ -24,16 +28,40 @@ Before each turn there is a 1×1-pixel screen-reader-only Text element acting as
 
 After each assistant turn a `StatusBar` element with `ClassName=sr-only` (empty name) marks "answer complete" (likely `role="status"`).
 
-Outer container: `Group` with `Name="Hauptbereich"` / `"Main area"` wraps the scrollable chat. Per-message footer: `Group` `Name="Message actions"` (timestamp + feedback + copy).
+Per-message footer: `Group Name="Message actions"` (timestamp + feedback + copy).
 
-Use `dumpUIA` to re-verify when Anthropic ships UI changes:
+### Code surface
 
-```powershell
-python ..\dumpUIA\dumpUIA.py            # list windows, find Claude's HWND
-python ..\dumpUIA\dumpUIA.py -w <hwnd> -j > claude.json
+No `sr-only` anchors. Instead, every turn ends with a deterministic two-button footer:
+
+| Button name (DE / EN) | Meaning |
+|---|---|
+| `Nachricht kopieren` / `Copy message` | Universal copy button — appears on every turn |
+| `Von hier forken` / `Fork from here` | **Only on user turns** — used as the per-turn speaker marker |
+| `Als Kapitel anheften` / `Pin as chapter` | **Only on Claude turns** — used as the per-turn speaker marker |
+
+Claude turns are often prefixed with one or more activity-summary `Button` elements with names like `"Ausgeführt 13 Befehle, …"` / `"Ran 13 commands, …"`. These describe tool use and we treat them as part of the turn content.
+
+Per-turn layout (in document order):
+
+```
+[optional activity buttons]    # only on Claude turns
+[content Text / Hyperlinks / lists]
+"Nachricht kopieren"           # universal end-of-message button
+"Von hier forken" | "Als Kapitel anheften"   # speaker marker
+[timestamp Group]              # e.g. "2h ago"
 ```
 
-A captured dump from 2026-05-13 is preserved at `~/git/claude-uia.json` for reference.
+### Re-verifying with dumpUIA
+
+```powershell
+python ..\dumpUIA\dumpUIA.py                    # list windows, find Claude's HWND
+python ..\dumpUIA\dumpUIA.py -w <hwnd> -j > x.json
+```
+
+Reference dumps preserved at:
+- `~/git/claude-uia.json` (Chat surface, 2026-05-13)
+- `~/git/claude-code-uia.json` (Code surface, 2026-05-14)
 
 ## Code structure
 
@@ -52,16 +80,21 @@ Reference implementation patterns Stefan has used: `~/git/NVDAiCloudPasswordMana
 
 - Filename must be lowercase (`claude.py`) — NVDA lowercases the exe name before importing.
 - Each gesture is a `@script`-decorated method on `AppModule`.
-- Navigation: `_collect_anchors(root)` walks descendants of the foreground window, filters STATICTEXT objects whose name starts with one of the configured prefixes, sorts by `location.top`. `_current_anchor_index` finds the user's position using the review cursor or focus top. `_move_to` scrolls into view + sets review position + speaks.
-- "Read current message" / "Copy" use `_collect_message_text` which gathers Text/Link content between the current anchor and the next.
-- Tuneables at the top of `claude.py`: `USER_PREFIXES`, `ASSISTANT_PREFIXES`, `MAIN_AREA_NAMES`, `MAX_WALK_DEPTH`.
+- Internally, turns are normalized into `_Turn(speaker, nav_obj, start_top, end_top)`. Each surface has its own collector (`_collect_chat_turns`, `_collect_code_turns`); `_collect_turns` tries chat first, falls back to code.
+- `_move_to(obj)` scrolls into view + sets review position + speaks.
+- `_collect_message_text(turn, root)` gathers all content between `turn.start_top` and `turn.end_top`, skipping 1×1 sr-only fillers and the universal footer buttons (`Nachricht kopieren`, `Als Kapitel anheften`, `Von hier forken`, EN equivalents).
+- Tuneables at the top of `claude.py`:
+  - `CHAT_USER_PREFIXES`, `CHAT_ASSISTANT_PREFIXES` — sr-only anchor prefixes
+  - `CODE_USER_TERMINATORS`, `CODE_ASSISTANT_TERMINATORS` — exact-match button names
+  - `CODE_ACTIVITY_PREFIXES` — only used for documentation, not currently filtered
+  - `MAIN_AREA_NAMES`, `MAX_WALK_DEPTH`
 
 ## Future work
 
-- **Code surface support**: needs a fresh `dumpUIA` capture while the desktop client is in Code mode. Add a `CodeSurface` navigator with its own anchor pattern.
-- **Cowork surface support**: same — needs a capture.
-- **Surface detection**: today, gestures simply fall through to "No messages on this surface" if no chat anchors are found. A more polished version could detect the surface by URL/heading and switch navigator implementations.
-- **Streaming indicator**: the empty `StatusBar`-`sr-only` could be an "answer complete" event hook (v0.2).
+- **Cowork surface support**: needs a fresh `dumpUIA` capture while the desktop client is in Cowork mode. Add a `_collect_cowork_turns` after the same pattern.
+- **Stronger surface detection**: today the dispatcher just tries chat then code. If a future surface looks accidentally like one of them (e.g. a button accidentally named "Pin as chapter") we'd misroute. A canonical signal — Hauptbereich's first descendant's class name, or an aria-label on the chat container — would be more robust.
+- **Streaming indicator**: the empty `StatusBar`-`sr-only` on the Chat surface could be an "answer complete" event hook.
+- **Filtering activity buttons on Code**: currently "read full message" includes the "Ran 13 commands, …" activity summary; if too verbose, add an option to skip lines starting with `CODE_ACTIVITY_PREFIXES`.
 
 ## Build
 

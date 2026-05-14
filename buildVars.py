@@ -22,14 +22,14 @@ addon_info = AddonInfo(
 	# Add-on description
 	# Translators: Long description to be shown for this add-on on add-on information from add-on store
 	addon_description=_("""Makes the Anthropic Claude desktop client more accessible for screen reader users.
-Adds keyboard shortcuts to jump between chat messages (next/previous, user-only, Claude-only),
+Adds keyboard shortcuts to jump between messages (next/previous, user-only, Claude-only),
 to read the current message in full, and to copy it to the clipboard.
-Only the Chat surface is supported in this version; Code and Cowork surfaces are planned."""),
+Works on the Chat and Code surfaces (auto-detected); Cowork support is planned."""),
 	# version
-	addon_version="0.1.0",
+	addon_version="0.2.0",
 	# Brief changelog for this version
 	# Translators: what's new content for the add-on version to be shown in the add-on store
-	addon_changelog=_("""Version 0.1.0: Initial release. Keyboard navigation between chat messages in the Claude desktop client. Uses the screen-reader-only turn anchors that Anthropic already ships in the DOM."""),
+	addon_changelog=_("""Version 0.2.0: Adds support for the Code surface (Claude Code sessions). The same shortcuts now also navigate Code conversations using the per-turn "Fork from here" / "Pin as chapter" buttons that Anthropic ships in the Code DOM. Surface is auto-detected; gestures still no-op on Cowork until that surface is analyzed.\n\nVersion 0.1.0: Initial release. Keyboard navigation between chat messages in the Claude desktop client. Uses the screen-reader-only turn anchors that Anthropic already ships in the DOM."""),
 	# Author(s)
 	addon_author="Stefan Lohmaier <stefan@slohmaier.de>",
 	# URL for the add-on documentation support
